@@ -1,0 +1,338 @@
+#
+# Description: Auto compile zig-template for multiple architectures and platforms
+#
+name: "Build zig-template"
+on:
+  push:
+    branches: [ "main", "master" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+    inputs:
+      ssh:
+        description: 'SSH connection to Actions'
+        required: false
+        default: 'false'
+      platforms:
+        description: 'Platforms to build (comma-separated: linux,windows)'
+        required: false
+        default: 'linux,windows'
+      architectures:
+        description: 'Architectures to build (comma-separated: x86_64,aarch64,arm,riscv64,powerpc64le,mips,mipsel)'
+        required: false
+        default: 'x86_64,aarch64,arm,riscv64,powerpc64le,mips,mipsel'
+
+permissions:
+  contents: write
+
+env:
+  TZ: Asia/Shanghai
+  PROJECT_NAME: zig-template
+
+jobs:
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.set_version.outputs.version }}
+      matrix: ${{ steps.set_matrix.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set version
+        id: set_version
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            # Tag trigger: use tag name as version (strip 'v' prefix)
+            VERSION=$(echo "${{ github.ref_name }}" | sed 's/^v//')
+            echo "Build triggered by Tag: Using Version=$VERSION"
+          else
+            # Non-tag trigger: use date + run_number + short SHA
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            VERSION="0.0.0-dev.${{ github.run_number }}.g${SHORT_SHA}"
+            echo "Build triggered by Commit: Using Version=$VERSION"
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Set build matrix
+        id: set_matrix
+        run: |
+          # Determine platforms and architectures
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            PLATFORMS="${{ github.event.inputs.platforms }}"
+            ARCHITECTURES="${{ github.event.inputs.architectures }}"
+          else
+            PLATFORMS="linux,windows"
+            ARCHITECTURES="x86_64,aarch64,arm,riscv64,powerpc64le,mips,mipsel"
+          fi
+
+          echo "Platforms: $PLATFORMS"
+          echo "Architectures: $ARCHITECTURES"
+
+          # Build matrix JSON
+          MATRIX_JSON='{"include":['
+          FIRST=true
+
+          IFS=',' read -ra ARCH_ARRAY <<< "$ARCHITECTURES"
+          IFS=',' read -ra PLATFORM_ARRAY <<< "$PLATFORMS"
+
+          for ARCH in "${ARCH_ARRAY[@]}"; do
+            ARCH=$(echo "$ARCH" | xargs)  # trim whitespace
+            for PLATFORM in "${PLATFORM_ARRAY[@]}"; do
+              PLATFORM=$(echo "$PLATFORM" | xargs)  # trim whitespace
+
+              # Determine zig target triple
+              case "$PLATFORM" in
+                linux)
+                  case "$ARCH" in
+                    x86_64)     ZIG_TARGET="x86_64-linux-musl" ;;
+                    aarch64)    ZIG_TARGET="aarch64-linux-musl" ;;
+                    arm)        ZIG_TARGET="arm-linux-musleabihf" ;;
+                    riscv64)    ZIG_TARGET="riscv64-linux-musl" ;;
+                    powerpc64le) ZIG_TARGET="powerpc64le-linux-musl" ;;
+                    mips)       ZIG_TARGET="mips-linux-musl" ;;
+                    mipsel)     ZIG_TARGET="mipsel-linux-musl" ;;
+                    *) continue ;;
+                  esac
+                  ;;
+                windows)
+                  case "$ARCH" in
+                    x86_64)     ZIG_TARGET="x86_64-windows" ;;
+                    aarch64)    ZIG_TARGET="aarch64-windows" ;;
+                    *) continue ;;  # Skip unsupported arch for windows
+                  esac
+                  ;;
+                *) continue ;;
+              esac
+
+              if [ "$FIRST" = true ]; then
+                FIRST=false
+              else
+                MATRIX_JSON+=','
+              fi
+              MATRIX_JSON+="{\"target\":\"$ZIG_TARGET\",\"arch\":\"$ARCH\",\"platform\":\"$PLATFORM\"}"
+            done
+          done
+
+          MATRIX_JSON+=']}'
+          echo "Generated matrix: $MATRIX_JSON"
+          echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.0
+
+      - name: Build
+        run: |
+          zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
+
+      - name: Package
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          TARGET="${{ matrix.target }}"
+          PACKAGE_DIR="${PROJECT_NAME}-${VERSION}-${TARGET}"
+
+          # Determine executable name
+          EXE_NAME="${PROJECT_NAME}"
+          if [[ "$TARGET" == *"-windows"* ]]; then
+            EXE_NAME="${PROJECT_NAME}.exe"
+          fi
+
+          mkdir -p "release/${PACKAGE_DIR}"
+          cp "zig-out/bin/${EXE_NAME}" "release/${PACKAGE_DIR}/"
+          cp LICENSE "release/${PACKAGE_DIR}/" 2>/dev/null || true
+          cp README.md "release/${PACKAGE_DIR}/" 2>/dev/null || true
+
+          if [[ "$TARGET" == *"-windows"* ]]; then
+            (cd release && zip -r "${PROJECT_NAME}-${VERSION}-${TARGET}.zip" "${PACKAGE_DIR}" > /dev/null)
+          else
+            tar -czvf "release/${PROJECT_NAME}-${VERSION}-${TARGET}.tar.gz" -C release "${PACKAGE_DIR}"
+          fi
+          rm -rf "release/${PACKAGE_DIR}"
+
+          echo "📦 Package: ${PROJECT_NAME}-${VERSION}-${TARGET}"
+          ls -lh release/*
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PROJECT_NAME }}-${{ matrix.target }}
+          path: |
+            release/*.tar.gz
+            release/*.zip
+
+  compress:
+    name: UPX Compress
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4.1.7
+        with:
+          path: artifacts
+          pattern: ${{ env.PROJECT_NAME }}-*
+          merge-multiple: true
+
+      - name: Install UPX
+        run: |
+          echo "Attempting to detect latest UPX version via redirection..."
+          DETECTED_TAG=$(curl -sI https://github.com/upx/upx/releases/latest | grep -i "location:" | awk -F'/' '{print $NF}' | tr -d '\r' | tr -d '\n')
+          
+          if [ -z "$DETECTED_TAG" ] || [ "$DETECTED_TAG" = "latest" ]; then
+            echo "⚠️  Failed to detect version or API limit reached. Falling back to v5.1.0"
+            UPX_VERSION="v5.1.0"
+          else
+            UPX_VERSION=$DETECTED_TAG
+            echo "✅ Detected latest version: ${UPX_VERSION}"
+          fi
+
+          PURE_VER=$(echo ${UPX_VERSION} | sed 's/^v//')
+          
+          echo "Downloading UPX ${UPX_VERSION}..."
+          URL="https://github.com/upx/upx/releases/download/${UPX_VERSION}/upx-${PURE_VER}-amd64_linux.tar.xz"
+          
+          if wget -q --method=HEAD "$URL"; then
+            wget -q "$URL"
+            tar -xf upx-${PURE_VER}-amd64_linux.tar.xz
+            sudo mv upx-${PURE_VER}-amd64_linux/upx /usr/local/bin/
+            sudo chmod +x /usr/local/bin/upx
+            rm -rf upx-${PURE_VER}-amd64_linux*
+            upx --version
+          else
+            echo "❌ Error: Download URL not found: $URL"
+            echo "Please check if version ${UPX_VERSION} exists on GitHub."
+            exit 1
+          fi
+
+      - name: Extract, compress and display comparison
+        env:
+          PROJECT_NAME: ${{ env.PROJECT_NAME }}
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          mkdir -p workdir release
+
+          echo "=========================================="
+          echo "🗜️  UPX COMPRESSION SUMMARY"
+          echo "=========================================="
+          printf "| %-40s | %-12s | %-12s | %-10s |\n" "Target" "Before (KB)" "After (KB)" "Ratio"
+          printf "| %-40s | %-12s | %-12s | %-10s |\n" "----------------------------------------" "------------" "------------" "----------"
+
+          for archive in artifacts/*.tar.gz artifacts/*.zip; do
+            if [ -f "$archive" ]; then
+              BASENAME=$(basename "$archive")
+              # Remove extension (.tar.gz or .zip)
+              BASENAME_NO_EXT="${BASENAME%.tar.gz}"
+              BASENAME_NO_EXT="${BASENAME_NO_EXT%.zip}"
+              TARGET=$(echo "$BASENAME_NO_EXT" | sed "s/${PROJECT_NAME}-${VERSION}-//")
+
+              # Extract the archive
+              if [[ "$archive" == *.zip ]]; then
+                unzip -q "$archive" -d workdir/
+              else
+                tar -xzf "$archive" -C workdir/
+              fi
+
+              # Find the executable
+              PACKAGE_DIR=$(find workdir -maxdepth 1 -type d -name "${PROJECT_NAME}-*" | head -n 1)
+
+              # Determine executable name
+              EXE_NAME="${PROJECT_NAME}"
+              if [[ "$TARGET" == *"-windows"* ]]; then
+                EXE_NAME="${PROJECT_NAME}.exe"
+              fi
+              EXECUTABLE="${PACKAGE_DIR}/${EXE_NAME}"
+
+              if [ -f "$EXECUTABLE" ]; then
+                # Get size before compression
+                SIZE_BEFORE=$(stat -c%s "$EXECUTABLE")
+                SIZE_BEFORE_KB=$((SIZE_BEFORE / 1024))
+
+                # Compress with UPX (skip if unsupported architecture)
+                if upx --best --lzma "$EXECUTABLE" > /tmp/upx_output.txt 2>&1; then
+                  # Get size after compression
+                  SIZE_AFTER=$(stat -c%s "$EXECUTABLE")
+                  SIZE_AFTER_KB=$((SIZE_AFTER / 1024))
+
+                  # Calculate compression ratio
+                  RATIO=$(awk "BEGIN {printf \"%.1f%%\", (1 - $SIZE_AFTER / $SIZE_BEFORE) * 100}")
+
+                  printf "| %-40s | %10s KB | %10s KB | %9s |\n" "$TARGET" "$SIZE_BEFORE_KB" "$SIZE_AFTER_KB" "$RATIO"
+                else
+                  # UPX failed (architecture not supported)
+                  printf "| %-40s | %10s KB | %12s | %10s |\n" "$TARGET" "$SIZE_BEFORE_KB" "unsupported" "N/A"
+                fi
+
+                # Re-package the compressed files
+                cd workdir
+                if [[ "$TARGET" == *"-windows"* ]]; then
+                  zip -r "../release/${BASENAME_NO_EXT}.zip" "$(basename "$PACKAGE_DIR")" > /dev/null 2>&1
+                else
+                  tar -czf "../release/${BASENAME_NO_EXT}.tar.gz" "$(basename "$PACKAGE_DIR")" > /dev/null 2>&1
+                fi
+                if [ $? -ne 0 ]; then
+                  echo "Error: Failed to create archive for ${TARGET}"
+                  exit 1
+                fi
+                cd ..
+              fi
+
+              # Clean up extracted files
+              rm -rf workdir/*
+            fi
+          done
+
+          echo "=========================================="
+
+      - name: Upload compressed artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: compressed-artifacts
+          path: |
+            release/*.tar.gz
+            release/*.zip
+
+  release:
+    name: Release
+    needs: [prepare, compress]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download compressed artifacts
+        uses: actions/download-artifact@v4.1.7
+        with:
+          path: release
+          pattern: compressed-artifacts
+          merge-multiple: true
+
+      - name: Prepare release notes
+        run: |
+          echo "![](https://img.shields.io/github/downloads/${{ github.repository }}/${{ github.ref_name }}/total?style=flat-square)" >> release.txt
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          body_path: release.txt
+          files: release/*
