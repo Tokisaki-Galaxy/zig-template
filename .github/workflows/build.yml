@@ -164,7 +164,7 @@ jobs:
           if [[ "$TARGET" == *"-windows"* ]]; then
             (cd release && zip -r "${PROJECT_NAME}-${VERSION}-${TARGET}.zip" "${PACKAGE_DIR}" > /dev/null)
           else
-            tar -czvf "release/${PROJECT_NAME}-${VERSION}-${TARGET}.tar.gz" -C release "${PACKAGE_DIR}"
+            tar -czf "release/${PROJECT_NAME}-${VERSION}-${TARGET}.tar.gz" -C release "${PACKAGE_DIR}"
           fi
           rm -rf "release/${PACKAGE_DIR}"
 
