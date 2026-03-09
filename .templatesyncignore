@@ -1,9 +1,15 @@
 .all-contributorsrc
 .github/dependabot.yml
+.templatesyncignore
+.github/workflows/*
+.gitignore
+.vscode/*
 README.md
 Dockerfile
 SECURITY.md
 docker-compose.yml
 Makefile
 LICENSE
-.github/workflows/*
+
+build.zig.zon
+build.zig
