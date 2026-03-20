@@ -10,10 +10,6 @@ on:
     branches: [ "main", "master" ]
   workflow_dispatch:
     inputs:
-      ssh:
-        description: 'SSH connection to Actions'
-        required: false
-        default: 'false'
       platforms:
         description: 'Platforms to build (comma-separated: linux,windows)'
         required: false
@@ -161,11 +157,7 @@ jobs:
           cp LICENSE "release/${PACKAGE_DIR}/" 2>/dev/null || true
           cp README.md "release/${PACKAGE_DIR}/" 2>/dev/null || true
 
-          if [[ "$TARGET" == *"-windows"* ]]; then
-            (cd release && zip -r "${PROJECT_NAME}-${VERSION}-${TARGET}.zip" "${PACKAGE_DIR}" > /dev/null)
-          else
-            tar -czf "release/${PROJECT_NAME}-${VERSION}-${TARGET}.tar.gz" -C release "${PACKAGE_DIR}"
-          fi
+          tar -czf "release/${PROJECT_NAME}-${VERSION}-${TARGET}.tar.gz" -C release "${PACKAGE_DIR}"
           rm -rf "release/${PACKAGE_DIR}"
 
           echo "📦 Package: ${PROJECT_NAME}-${VERSION}-${TARGET}"
@@ -177,11 +169,11 @@ jobs:
           name: ${{ env.PROJECT_NAME }}-${{ matrix.target }}
           path: |
             release/*.tar.gz
-            release/*.zip
 
   compress:
     name: UPX Compress
     needs: [prepare, build]
+    if: true
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -235,20 +227,13 @@ jobs:
           printf "| %-40s | %-12s | %-12s | %-10s |\n" "Target" "Before (KB)" "After (KB)" "Ratio"
           printf "| %-40s | %-12s | %-12s | %-10s |\n" "----------------------------------------" "------------" "------------" "----------"
 
-          for archive in artifacts/*.tar.gz artifacts/*.zip; do
+          for archive in artifacts/*.tar.gz; do
             if [ -f "$archive" ]; then
               BASENAME=$(basename "$archive")
-              # Remove extension (.tar.gz or .zip)
+              # Remove extension (.tar.gz)
               BASENAME_NO_EXT="${BASENAME%.tar.gz}"
-              BASENAME_NO_EXT="${BASENAME_NO_EXT%.zip}"
               TARGET=$(echo "$BASENAME_NO_EXT" | sed "s/${PROJECT_NAME}-${VERSION}-//")
-
-              # Extract the archive
-              if [[ "$archive" == *.zip ]]; then
-                unzip -q "$archive" -d workdir/
-              else
-                tar -xzf "$archive" -C workdir/
-              fi
+              tar -xzf "$archive" -C workdir/
 
               # Find the executable
               PACKAGE_DIR=$(find workdir -maxdepth 1 -type d -name "${PROJECT_NAME}-*" | head -n 1)
@@ -282,11 +267,7 @@ jobs:
 
                 # Re-package the compressed files
                 cd workdir
-                if [[ "$TARGET" == *"-windows"* ]]; then
-                  zip -r "../release/${BASENAME_NO_EXT}.zip" "$(basename "$PACKAGE_DIR")" > /dev/null 2>&1
-                else
-                  tar -czf "../release/${BASENAME_NO_EXT}.tar.gz" "$(basename "$PACKAGE_DIR")" > /dev/null 2>&1
-                fi
+                tar -czf "../release/${BASENAME_NO_EXT}.tar.gz" "$(basename "$PACKAGE_DIR")" > /dev/null 2>&1
                 if [ $? -ne 0 ]; then
                   echo "Error: Failed to create archive for ${TARGET}"
                   exit 1
@@ -307,7 +288,6 @@ jobs:
           name: compressed-artifacts
           path: |
             release/*.tar.gz
-            release/*.zip
 
   release:
     name: Release
